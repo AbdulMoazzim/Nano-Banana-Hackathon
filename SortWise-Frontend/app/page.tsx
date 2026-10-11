@@ -10,6 +10,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
+import Image from "next/image";
 import Link from "next/link";
 
 const NAV = [
@@ -79,9 +80,18 @@ export default function Home() {
     <div className="flex min-h-screen flex-col">
       <header className="sticky top-0 z-10 border-b bg-background/80 backdrop-blur">
         <div className="mx-auto flex h-14 max-w-5xl items-center justify-between px-4">
-          <Link href="#top" className="font-semibold tracking-tight">
-            SortWise AI
-          </Link>
+          <div className="flex items-center relative">
+            <Image
+              height={70}
+              width={70}
+              src="/icon.png"
+              alt="icon"
+              className="w-[70px]"
+            />
+            <Link href="#top" className="font-semibold -ml-3">
+              SortWise AI
+            </Link>
+          </div>
           <nav aria-label="Primary" className="hidden gap-6 text-sm sm:flex">
             {NAV.map((n) => (
               <Link
@@ -123,7 +133,7 @@ export default function Home() {
 
         {/* Analyzer */}
         <section id="analyze">
-          <RedirectionButton link="/analyze" text="Ready To Analyze"/>
+          <RedirectionButton link="/analyze" text="Ready To Analyze" />
         </section>
 
         <Separator />
