@@ -1,4 +1,4 @@
-"""Local Trash-Net image validation and classification, plus OpenRouter condition assessment."""
+"""Local Trash-Net image validation and external vision fallbacks."""
 from __future__ import annotations
 
 import asyncio
@@ -226,28 +226,44 @@ async def _local_classification_fallback(image: Image.Image) -> dict[str, Any]:
 
 
 async def analyze_image(data: bytes, description: str | None = None) -> dict[str, Any]:
-    """Try configured OpenRouter models in order, then local Trash-Net once."""
+    """Try OpenRouter, then Gemini, then local Trash-Net once."""
     image = _validated_image(data)
     api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
-    if not api_key:
-        return await _local_classification_fallback(image)
-
     prepared = prepare_image(data)
     context = f"\nAdditional user context: {description.strip()}" if description and description.strip() else ""
     last_error: Exception | None = None
-    for model in _openrouter_model_chain():
+    if api_key:
+        for model in _openrouter_model_chain():
+            try:
+                raw_text = await _call_openrouter_prompt(
+                    api_key, model, prepared.data_url, _CLASSIFICATION_PROMPT + context,
+                    "OPENROUTER_CLASSIFICATION_MAX_TOKENS", 256, "classification",
+                )
+                result = _extract_classification_json(raw_text)
+                return result
+            except ImageValidationError:
+                raise
+            except Exception as exc:
+                last_error = exc
+                logger.warning("OpenRouter classification model failed (%s): model=%s; trying next configured model.", type(exc).__name__, model)
+    else:
+        logger.debug("analyze_image: OPENROUTER_API_KEY not set; trying Gemini if configured.")
+
+    gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    gemini_model = os.environ.get("GEMINI_MODEL", _GEMINI_DEFAULT_MODEL).strip() or _GEMINI_DEFAULT_MODEL
+    if gemini_key:
         try:
-            raw_text = await _call_openrouter_prompt(
-                api_key, model, prepared.data_url, _CLASSIFICATION_PROMPT + context,
-                "OPENROUTER_CLASSIFICATION_MAX_TOKENS", 256, "classification",
+            raw_text = await _call_gemini_prompt(
+                gemini_key, gemini_model, prepared.data_url,
+                _CLASSIFICATION_PROMPT + context,
+                "GEMINI_CLASSIFICATION_MAX_TOKENS", 256, "classification",
             )
-            result = _extract_classification_json(raw_text)
-            return result
+            return _extract_classification_json(raw_text)
         except ImageValidationError:
             raise
         except Exception as exc:
             last_error = exc
-            logger.warning("OpenRouter classification model failed (%s): model=%s; trying next configured model.", type(exc).__name__, model)
+            logger.warning("Gemini classification failed (%s): model=%s; using local fallback.", type(exc).__name__, gemini_model)
 
     try:
         return await _local_classification_fallback(image)
@@ -265,6 +281,8 @@ _VERIFIED_FALLBACK_MODELS = (
     "dots-studio/dots-3-note-preview:free",
     "thinkingmachines/inkling-small:free",
 )
+_GEMINI_DEFAULT_MODEL = "gemini-2.5-flash"
+_GEMINI_DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 _CONDITION_FIELDS = ("cracks_fractures", "holes_leaks_breakage", "severe_deformation")
 _VALID_STATUSES = frozenset({"not_detected", "detected", "unable_to_assess"})
 _VALID_CONDITION_TYPES = frozenset(_CONDITION_FIELDS)
@@ -445,6 +463,89 @@ def _extract_message_content(body: Any) -> str:
     return ""
 
 
+def _extract_gemini_content(body: Any) -> str:
+    if not isinstance(body, dict):
+        raise VisionResponseError("Gemini response was not a JSON object.")
+    candidates = body.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        raise VisionResponseError("Gemini response did not contain candidates.")
+    content = candidates[0].get("content", {})
+    parts = content.get("parts", []) if isinstance(content, dict) else []
+    if not isinstance(parts, list):
+        raise VisionResponseError("Gemini response parts were invalid.")
+    text = "".join(part.get("text", "") for part in parts if isinstance(part, dict) and isinstance(part.get("text"), str))
+    if not text.strip():
+        raise VisionResponseError("Gemini returned empty content.")
+    return text
+
+
+def _gemini_endpoint(model: str) -> str:
+    return f"{_GEMINI_DEFAULT_BASE_URL}/models/{model}:generateContent"
+
+
+async def _call_gemini_prompt(
+    api_key: str,
+    model: str,
+    data_url: str,
+    prompt: str,
+    max_tokens_name: str,
+    default_max_tokens: int,
+    operation: str,
+) -> str:
+    """Call Gemini with the same bounded JPEG and task prompt used by OpenRouter."""
+    import httpx
+
+    try:
+        media_header, encoded_image = data_url.split(",", 1)
+        media_type = media_header.removeprefix("data:").split(";", 1)[0]
+        if media_type != "image/jpeg" or not encoded_image:
+            raise ValueError("unsupported image data URL")
+    except (ValueError, AttributeError) as exc:
+        raise VisionResponseError("Gemini image payload could not be prepared.") from exc
+
+    payload = {
+        "contents": [{
+            "role": "user",
+            "parts": [
+                {"inline_data": {"mime_type": media_type, "data": encoded_image}},
+                {"text": prompt},
+            ],
+        }],
+        "generationConfig": {
+            "temperature": 0.1,
+            "maxOutputTokens": int(_condition_setting(max_tokens_name, default_max_tokens, 64, 1024)),
+            "responseMimeType": "application/json",
+        },
+    }
+    started = time.perf_counter()
+    try:
+        async with httpx.AsyncClient(timeout=_condition_setting("GEMINI_TIMEOUT_SECONDS", 20.0, 5.0, 60.0)) as client:
+            response = await client.post(
+                _gemini_endpoint(model),
+                json=payload,
+                headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+            )
+    except Exception as exc:
+        logger.warning("Gemini %s request failed (%s) after %.2fs: %s", operation, type(exc).__name__, time.perf_counter() - started, _sanitize_provider_text(str(exc)) or "no detail")
+        raise
+
+    elapsed = time.perf_counter() - started
+    logger.info("Gemini %s response: HTTP %s in %.2fs", operation, response.status_code, elapsed)
+    if response.status_code != 200:
+        logger.warning("Gemini %s provider error: HTTP %s; body=%s", operation, response.status_code, _sanitize_provider_body(response))
+        raise VisionProviderError(f"Gemini returned HTTP {response.status_code}.")
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise VisionResponseError("Gemini response was not valid JSON.") from exc
+    if isinstance(body, dict) and body.get("error"):
+        logger.warning("Gemini %s returned an error object: model=%s elapsed=%.2fs details=%s", operation, model, elapsed, _sanitize_provider_body(response))
+        raise VisionProviderError("Gemini returned an error object.")
+    if not isinstance(body, dict) or not body.get("candidates"):
+        logger.warning("Gemini %s returned an unexpected response: model=%s elapsed=%.2fs details=%s", operation, model, elapsed, _sanitize_provider_body(response))
+    return _extract_gemini_content(body)
+
+
 async def _call_openrouter_prompt(api_key: str, model: str, data_url: str, prompt: str, max_tokens_name: str, default_max_tokens: int, operation: str = "condition") -> str:
     """POST to OpenRouter and return the raw text content of the first choice."""
     import httpx
@@ -512,26 +613,41 @@ async def assess_condition(
 ) -> dict[str, Any]:
     """Assess conditions with each configured OpenRouter model once, then fall back safely."""
     api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
-    if not api_key:
-        logger.debug("assess_condition: OPENROUTER_API_KEY not set; skipping.")
-        return _safe_fallback_condition()
-
     started = time.perf_counter()
     try:
         prepared = prepare_image(data)
     except ImageValidationError:
         raise
 
-    for model in _openrouter_model_chain():
+    if api_key:
+        for model in _openrouter_model_chain():
+            try:
+                raw_text = await _call_openrouter(api_key, model, prepared.data_url)
+                parsed = _extract_condition_json(raw_text)
+                logger.info("Condition assessment completed with model=%s in %.2fs.", model, time.perf_counter() - started)
+                return parsed
+            except ImageValidationError:
+                raise
+            except Exception as exc:
+                logger.warning("OpenRouter condition model failed (%s): model=%s; trying next configured model.", type(exc).__name__, model)
+    else:
+        logger.debug("assess_condition: OPENROUTER_API_KEY not set; trying Gemini if configured.")
+
+    gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    gemini_model = os.environ.get("GEMINI_MODEL", _GEMINI_DEFAULT_MODEL).strip() or _GEMINI_DEFAULT_MODEL
+    if gemini_key:
         try:
-            raw_text = await _call_openrouter(api_key, model, prepared.data_url)
+            raw_text = await _call_gemini_prompt(
+                gemini_key, gemini_model, prepared.data_url, _CONDITION_PROMPT,
+                "GEMINI_CONDITION_MAX_TOKENS", 256, "condition",
+            )
             parsed = _extract_condition_json(raw_text)
-            logger.info("Condition assessment completed with model=%s in %.2fs.", model, time.perf_counter() - started)
+            logger.info("Condition assessment completed with Gemini model=%s in %.2fs.", gemini_model, time.perf_counter() - started)
             return parsed
         except ImageValidationError:
             raise
         except Exception as exc:
-            logger.warning("OpenRouter condition model failed (%s): model=%s; trying next configured model.", type(exc).__name__, model)
+            logger.warning("Gemini condition model failed (%s): model=%s; returning unable_to_assess.", type(exc).__name__, gemini_model)
 
-    logger.warning("All OpenRouter condition models failed after %.2fs; returning unable_to_assess.", time.perf_counter() - started)
+    logger.warning("All external condition models failed after %.2fs; returning unable_to_assess.", time.perf_counter() - started)
     return _safe_fallback_condition()

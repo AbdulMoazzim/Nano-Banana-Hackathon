@@ -20,6 +20,7 @@ from vision import (
     prepare_image,
     _extract_condition_json,
     _call_openrouter_prompt,
+    _call_gemini_prompt,
     _safe_fallback_condition,
     assess_condition,
 )
@@ -120,6 +121,109 @@ async def test_openrouter_and_local_classification_fail_safely(monkeypatch):
         with patch("vision._classify_local", side_effect=VisionResponseError("local unavailable")):
             with pytest.raises(VisionResponseError):
                 await analyze_image(img())
+
+
+@pytest.mark.asyncio
+async def test_gemini_request_uses_inline_image_and_json_output():
+    class FakeResponse:
+        status_code = 200
+        headers = {}
+
+        def json(self):
+            return {"candidates": [{"content": {"parts": [{"text": "{\"ok\":true}"}]}}]}
+
+    class FakeClient:
+        def __init__(self):
+            self.call = None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, *args, **kwargs):
+            self.call = (args, kwargs)
+            return FakeResponse()
+
+    client = FakeClient()
+    with patch("httpx.AsyncClient", return_value=client):
+        result = await _call_gemini_prompt(
+            "secret-key", "gemini-2.5-flash", "data:image/jpeg;base64,hidden",
+            "same task prompt", "TEST_MAX", 64, "classification",
+        )
+    assert result == '{"ok":true}'
+    assert client.call[0][0].endswith("/v1beta/models/gemini-2.5-flash:generateContent")
+    assert client.call[1]["headers"]["x-goog-api-key"] == "secret-key"
+    payload = client.call[1]["json"]
+    assert payload["contents"][0]["parts"][0]["inline_data"] == {"mime_type": "image/jpeg", "data": "hidden"}
+    assert payload["contents"][0]["parts"][1]["text"] == "same task prompt"
+    assert payload["generationConfig"]["responseMimeType"] == "application/json"
+
+
+@pytest.mark.asyncio
+async def test_gemini_classification_is_final_external_fallback(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("OPENROUTER_MODEL", "primary-model")
+    monkeypatch.setenv("OPENROUTER_FALLBACK_MODELS", "dots-studio/dots-3-note-preview:free,thinkingmachines/inkling-small:free")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash")
+    response = '{"item_name":"Bottle","category":"plastic","material":"plastic","confidence":0.8,"evidence":"Bottle visible."}'
+    openrouter = AsyncMock(side_effect=VisionProviderError("provider unavailable"))
+    gemini = AsyncMock(return_value=response)
+    with patch("vision._call_openrouter_prompt", new=openrouter), patch("vision._call_gemini_prompt", new=gemini):
+        result = await analyze_image(img())
+    assert result["category"] == "plastic"
+    assert openrouter.await_count == 3
+    assert gemini.await_count == 1
+    assert gemini.await_args.args[1] == "gemini-2.5-flash"
+
+
+@pytest.mark.asyncio
+async def test_gemini_failure_uses_local_classification_once(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("OPENROUTER_MODEL", "primary-model")
+    monkeypatch.setenv("OPENROUTER_FALLBACK_MODELS", "")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")
+    local_result = {"item_name": "Plastic item", "category": "plastic", "material": "plastic", "confidence": 0.8, "evidence": "Local fallback"}
+    with patch("vision._call_openrouter_prompt", new=AsyncMock(side_effect=VisionProviderError("provider unavailable"))), patch("vision._call_gemini_prompt", new=AsyncMock(side_effect=VisionProviderError("quota"))), patch("vision._classify_local", return_value=local_result):
+        result = await analyze_image(img())
+    assert result == local_result
+
+
+@pytest.mark.asyncio
+async def test_gemini_invalid_classification_output_uses_local(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("OPENROUTER_MODEL", "primary-model")
+    monkeypatch.setenv("OPENROUTER_FALLBACK_MODELS", "")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")
+    local_result = {"item_name": "Plastic item", "category": "plastic", "material": "plastic", "confidence": 0.8, "evidence": "Local fallback"}
+    with patch("vision._call_openrouter_prompt", new=AsyncMock(side_effect=VisionProviderError("provider unavailable"))), patch("vision._call_gemini_prompt", new=AsyncMock(return_value="not json")), patch("vision._classify_local", return_value=local_result):
+        result = await analyze_image(img())
+    assert result == local_result
+
+
+@pytest.mark.asyncio
+async def test_missing_external_keys_skips_gemini(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    local_result = {"item_name": "Plastic item", "category": "plastic", "material": "plastic", "confidence": 0.8, "evidence": "Local fallback"}
+    with patch("vision._call_gemini_prompt", new=AsyncMock()) as gemini, patch("vision._classify_local", return_value=local_result):
+        result = await analyze_image(img())
+    assert result == local_result
+    gemini.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_gemini_condition_success_after_openrouter_failure(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("OPENROUTER_MODEL", "primary-model")
+    monkeypatch.setenv("OPENROUTER_FALLBACK_MODELS", "")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")
+    with patch("vision._call_openrouter", new=AsyncMock(side_effect=VisionProviderError("provider unavailable"))), patch("vision._call_gemini_prompt", new=AsyncMock(return_value=_VALID_UNDAMAGED_JSON)) as gemini:
+        result = await assess_condition(img())
+    assert result["image_unclear"] is False
+    assert gemini.await_count == 1
 
 
 @pytest.mark.asyncio
