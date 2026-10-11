@@ -17,7 +17,7 @@ export default function AnalyzePage() {
               alt="icon"
               className="w-[70px]"
             />
-            <Link href="#top" className="font-semibold -ml-3">
+            <Link href="/" className="font-semibold -ml-3">
               SortWise AI
             </Link>
           </div>
