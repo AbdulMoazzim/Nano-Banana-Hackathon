@@ -17,7 +17,7 @@ from PIL import Image, ImageFile, UnidentifiedImageError
 
 ImageFile.LOAD_TRUNCATED_IMAGES = False
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
-MAX_IMAGE_PIXELS = 20_000_000
+MAX_IMAGE_PIXELS = 50_000_000
 MAX_IMAGE_DIMENSION = 2048
 MIN_CONFIDENCE = 0.45
 MODEL_ID = "prithivMLmods/Trash-Net"
