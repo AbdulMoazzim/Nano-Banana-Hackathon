@@ -43,7 +43,7 @@ Classification order is:
 
 1. Nemotron through OpenRouter: `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free`
 2. Dots through OpenRouter: `dots-studio/dots-3-note-preview:free`
-3. Inkling Small through OpenRouter: `thinkingmachines/inkling-small:free`
+3. Gemma through OpenRouter: `google/gemma-4-26b-a4b-it:free`
 4. Gemini API: the model in `GEMINI_MODEL` (default `gemini-2.5-flash`)
 5. Local `prithivMLmods/Trash-Net` once, if its cached checkpoint is available; otherwise the endpoint returns a safe `unknown` result.
 
@@ -127,7 +127,7 @@ OPENROUTER_API_KEY=
 OPENROUTER_MODEL=nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 OPENROUTER_CHAT_ENDPOINT=https://openrouter.ai/api/v1/chat/completions
-OPENROUTER_FALLBACK_MODELS=dots-studio/dots-3-note-preview:free,thinkingmachines/inkling-small:free
+OPENROUTER_FALLBACK_MODELS=dots-studio/dots-3-note-preview:free,google/gemma-4-26b-a4b-it:free
 OPENROUTER_CONDITION_TIMEOUT_SECONDS=20
 OPENROUTER_CONDITION_MAX_TOKENS=256
 OPENROUTER_CLASSIFICATION_MAX_TOKENS=256
@@ -206,3 +206,18 @@ The manifest contains optional human-provided expectations. Two images are not a
 Before changing code, inspect the relevant implementation, schemas, tests, configuration, and Git diff. Preserve `POST /api/v1/analyses`, its request fields, response fields, category literals, safe fallbacks, and the deterministic disposal engine. Reuse the existing `httpx`, Pillow, PyTorch, and Transformers dependencies instead of adding alternatives unnecessarily. Keep image preprocessing, provider calls, parsing, and disposal decisions modular. Add focused mocked tests for behavior changes, run the full suite, and report actual results.
 
 Never print, expose, stage, or commit `.env`, API keys, authorization headers, base64 image data, or sensitive provider responses. Do not claim a live integration or real-world model accuracy from unit tests; live behavior requires a successful request, and accuracy requires labelled evaluation data. Avoid unrelated refactoring, frontend changes, model downloads, training, automatic retry loops, force-pushes, and history rewrites.
+
+## Container deployment
+
+The included Dockerfile builds the API with Python 3.11, installs the dependency ranges, and preloads prithivMLmods/Trash-Net into /opt/huggingface during the image build. Runtime model loading remains local-only, so rebuild the image when model or dependency versions change.
+
+Build and run locally:
+
+~~~powershell
+docker build -t sortwise-api .
+docker run --rm -p 8000:8000 -e FRONTEND_ORIGIN=https://your-frontend.example -e OPENROUTER_API_KEY= -e GEMINI_API_KEY= sortwise-api
+~~~
+
+The backend needs enough disk for PyTorch, Transformers, and the Trash-Net checkpoint, plus enough RAM and startup time for CPU model loading. A small/free serverless plan may not support this workload reliably; use a persistent container service or VM with adequate memory. Do not deploy until the image build and /health check succeed.
+
+Set FRONTEND_ORIGIN to the exact browser origin, without a trailing path, such as https://sortwise.example.com. Set the frontend build variable NEXT_PUBLIC_API_URL to the backend base URL, such as https://api.sortwise.example.com. Do not include /api/v1/analyses in that variable.
