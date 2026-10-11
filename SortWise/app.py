@@ -3,7 +3,7 @@
 from uuid import uuid4
 
 from fastapi import FastAPI, File, Form, UploadFile
-
+from fastapi.middleware.cors import CORSMiddleware
 from schemas import AnalysisResponse
 
 app = FastAPI(
@@ -12,6 +12,16 @@ app = FastAPI(
     version="0.2.0",
 )
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://nano-banana-hackathon.vercel.app",
+        "http://localhost:3000",  # local Next.js dev; remove if not needed
+    ],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 @app.get("/", tags=["health"])
 def read_root() -> dict[str, str]:
