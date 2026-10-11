@@ -37,7 +37,7 @@ export interface AnalysisResponse {
 }
 
 export const API_URL =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
+  process.env.NEXT_PUBLIC_API_URL;
 
 export const MAX_BYTES = 10 * 1024 * 1024;
 export const ACCEPTED_TYPES = [
