@@ -3,6 +3,18 @@ import os
 from uuid import uuid4
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+
+try:
+    # pyrefly: ignore [missing-import]
+    import spaces
+
+    @spaces.GPU
+    def _init_gpu():
+        """Satisfy ZeroGPU startup check."""
+        return True
+except ImportError:
+    pass
+
 from decision_engine import decision_for
 from schemas import AnalysisResponse, WasteCondition, WasteResult
 from vision import (
@@ -21,13 +33,15 @@ app = FastAPI(
 )
 
 frontend_origin = os.environ.get("FRONTEND_ORIGIN", "").strip().rstrip("/")
+allowed_origins = [frontend_origin] if frontend_origin else ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[frontend_origin] if frontend_origin else [],
+    allow_origins=allowed_origins,
     allow_credentials=False,
-    allow_methods=["POST", "OPTIONS"],
-    allow_headers=["Content-Type"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
+
 
 
 @app.get("/")
@@ -99,3 +113,73 @@ async def receive_analysis(
         )
     finally:
         await image.close()
+
+import io
+import asyncio
+import gradio as gr
+from fastapi.openapi.docs import get_swagger_ui_html
+
+# 1. Interactive Testing Function directly on the Gradio page
+def test_classifier(image, description=""):
+    if image is None:
+        return {"error": "Please upload an image to test"}
+    
+    buf = io.BytesIO()
+    image.save(buf, format="JPEG")
+    image_bytes = buf.getvalue()
+    
+    try:
+        identification = asyncio.run(analyze_image(image_bytes, description))
+    except Exception as e:
+        return {"error": str(e)}
+        
+    disposal = decision_for(identification["category"])
+    return {
+        "item_name": identification["item_name"],
+        "category": disposal["category"],
+        "material": identification["material"],
+        "confidence": identification["confidence"],
+        "evidence": identification["evidence"],
+        "disposal_guidance": disposal["disposal_guidance"],
+        "preparation_steps": disposal["preparation_steps"],
+        "warnings": disposal["warnings"],
+    }
+
+# 2. Gradio Web Interface
+with gr.Blocks(title="SortWise AI API") as demo:
+    gr.Markdown("# 🚀 SortWise AI Backend & Trash-Net Engine")
+    gr.Markdown(
+        "Upload an image below to test the AI classification and disposal guidance live. "
+        "API docs available at [`/docs`](/docs)."
+    )
+    
+    with gr.Row():
+        with gr.Column():
+            img_input = gr.Image(type="pil", label="Upload Waste Image")
+            desc_input = gr.Textbox(label="Optional Description", placeholder="e.g. empty plastic soda bottle")
+            submit_btn = gr.Button("Analyze Waste", variant="primary")
+        with gr.Column():
+            json_output = gr.JSON(label="Analysis Result")
+            
+    submit_btn.click(fn=test_classifier, inputs=[img_input, desc_input], outputs=json_output)
+
+# 3. Attach FastAPI API endpoints (/api/v1/analyses, /health)
+demo.app.include_router(app.router)
+
+# 4. Explicitly attach Swagger UI to /docs and /openapi.json
+@demo.app.get("/docs", include_in_schema=False)
+async def swagger_docs():
+    return get_swagger_ui_html(openapi_url="/openapi.json", title="SortWise API - Swagger Docs")
+
+@demo.app.get("/openapi.json", include_in_schema=False)
+async def openapi_schema():
+    return app.openapi()
+
+if __name__ == "__main__":
+    demo.launch()
+else:
+    demo.launch()
+
+
+
+
