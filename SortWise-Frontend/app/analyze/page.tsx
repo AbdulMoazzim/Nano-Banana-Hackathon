@@ -11,11 +11,12 @@ export default function AnalyzePage() {
         <div className="mx-auto flex h-14 max-w-5xl items-center justify-between px-4">
           <div className="flex items-center relative">
             <Image
+              loading="eager"
               height={70}
               width={70}
               src="/icon.png"
               alt="icon"
-              className="w-[70px]"
+              className="w-[60px]"
             />
             <Link href="/" className="font-semibold -ml-3">
               SortWise AI
